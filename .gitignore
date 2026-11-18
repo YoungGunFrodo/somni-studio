@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# Local to each install: settings, the assistant's memory, credentials, downloaded models
+studio.json
+studio.json.tmp
+data/
+
+# Generated
+web/vendor/
+.cache/
+*.log
+.ruff_cache/
+.pytest_cache/

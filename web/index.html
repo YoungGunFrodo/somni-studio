@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Somni Studio</title>
+  <meta name="description" content="Live view of a Somni model's brain and memory.">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+  <script type="importmap">{"imports": {"three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/"}}</script>
+  <script type="module" src="/js/main.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/assets/icon.svg" alt="" class="brand-mark">
+      <span class="brand-name">SOMNI</span><span class="brand-sub">Studio</span>
+    </div>
+    <div class="home-chip" id="home-chip" title="Somni home">
+      <span class="dot" id="live-dot"></span><span id="home-path">connecting…</span>
+    </div>
+    <dl class="stats" id="stats">
+      <div><dt>memories</dt><dd data-stat="memories">–</dd></div>
+      <div><dt>tags</dt><dd data-stat="tags">–</dd></div>
+      <div><dt>files</dt><dd data-stat="files">–</dd></div>
+      <div><dt>experts</dt><dd data-stat="experts">–</dd></div>
+      <div><dt>layers</dt><dd data-stat="layers">–</dd></div>
+    </dl>
+    <div class="topbar-actions">
+      <div class="engine-pill" id="engine-pill" data-state="unloaded">
+        <span class="engine-led"></span>
+        <span class="engine-text" id="engine-text">model not loaded</span>
+      </div>
+      <button class="btn" id="engine-toggle" type="button">Load model</button>
+      <button class="btn btn-sleep" id="sleep-toggle" type="button" title="Learn from recent conversations now">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg><span id="sleep-toggle-text">Sleep now</span>
+      </button>
+      <button class="btn icon-btn" id="open-settings" type="button" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <nav class="rail" id="rail" aria-label="Sections">
+    <button class="rail-btn active" type="button" data-tab="brain" title="Brain &amp; memory">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="6" r="1.6"/><circle cx="5" cy="18" r="1.6"/><circle cx="19" cy="18" r="1.6"/><path d="m6.3 7 3.4 3M17.7 7l-3.4 3M6.3 17l3.4-3M17.7 17l-3.4-3"/></svg>
+      <span>Brain</span>
+    </button>
+    <button class="rail-btn" type="button" data-tab="model" title="Model">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>
+      <span>Model</span>
+    </button>
+    <button class="rail-btn" type="button" data-tab="sleep" title="Sleep &amp; review">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg>
+      <span>Sleep</span>
+    </button>
+    <button class="rail-btn" type="button" data-tab="voice" title="Voice">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg>
+      <span>Voice</span>
+    </button>
+    <button class="rail-btn" type="button" data-tab="connections" title="Connections">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0V7ZM12 16v5"/></svg>
+      <span>Connect</span>
+    </button>
+    <button class="rail-btn" type="button" data-tab="tools" title="Tools">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4 2.5-2.5Z"/></svg>
+      <span>Tools</span>
+    </button>
+  </nav>
+
+  <main class="stage" id="stage">
+    <div class="canvas-host" id="canvas-host"></div>
+
+    <aside class="drawer panel" id="drawer" hidden aria-label="Section">
+      <header class="panel-head">
+        <h2 id="drawer-title"></h2>
+        <button class="btn icon-btn btn-small" id="drawer-close" type="button" aria-label="Close" title="Close (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <div class="warnings" id="warnings" hidden></div>
+    <div class="gpu-banner" id="gpu-banner" hidden role="status">
+      <span id="gpu-banner-text"></span>
+      <span class="gpu-banner-actions">
+        <button class="btn btn-small" id="gpu-resume" type="button">Resume now</button>
+        <button class="btn btn-small" id="gpu-ignore" type="button">Always ignore</button>
+      </span>
+    </div>
+
+    <section class="toolbox panel" aria-label="View">
+      <div class="search">
+        <input id="search" type="search" placeholder="Find a memory, tag or file  ( / )" autocomplete="off" spellcheck="false">
+        <ul class="search-results" id="search-results" hidden></ul>
+      </div>
+      <div class="toggles">
+        <label class="toggle"><input type="checkbox" id="toggle-labels" checked><span>Labels</span></label>
+        <label class="toggle"><input type="checkbox" id="toggle-links" checked><span>Links</span></label>
+        <label class="toggle"><input type="checkbox" id="toggle-bloom" checked><span>Glow</span></label>
+        <label class="toggle"><input type="checkbox" id="toggle-spin"><span>Orbit</span></label>
+        <button class="btn btn-small" id="reset-view" type="button">Reset view</button>
+      </div>
+      <ul class="legend" id="legend" aria-label="Legend"></ul>
+    </section>
+
+    <section class="chat panel" id="chat" aria-label="Chat">
+      <header class="panel-head">
+        <h2>Talk to Somni</h2>
+        <span class="chat-mode" id="chat-mode"></span>
+        <button class="btn icon-btn btn-small" id="handsfree-toggle" type="button" aria-pressed="false" aria-label="Hands-free listening" title="Hands-free listening">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9a5 5 0 0 1 10 0c0 3-2.5 3.6-3.4 5.6-.6 1.4-.8 3.4-2.6 3.4a2.5 2.5 0 0 1-2.5-2.5"/><path d="M10 9.5a2 2 0 0 1 4 0"/></svg>
+        </button>
+        <button class="btn icon-btn btn-small" id="voice-toggle" type="button" aria-pressed="true" aria-label="Speak answers" title="Speak answers aloud">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path class="voice-waves" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/><path class="voice-mute" d="m16 9 6 6M22 9l-6 6"/></svg>
+        </button>
+        <button class="btn icon-btn btn-small" id="chat-collapse" type="button" aria-label="Collapse chat" title="Collapse">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+      </header>
+      <div class="chat-log" id="chat-log" aria-live="polite">
+        <p class="chat-empty" id="chat-empty">Ask something. Memories that recall finds light up on the right; the layers and experts the model uses light up on the left.</p>
+      </div>
+      <p class="voice-status" id="voice-status" hidden aria-live="polite"></p>
+      <form class="chat-form" id="chat-form" autocomplete="off">
+        <button class="btn icon-btn mic-button" id="mic-button" type="button" aria-pressed="false" aria-label="Talk" title="Talk">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        </button>
+        <textarea id="chat-input" rows="1" placeholder="Ask a question…" title="Enter sends · Shift+Enter adds a line" maxlength="4000"></textarea>
+        <button class="btn btn-primary" id="chat-send" type="submit">Send</button>
+      </form>
+    </section>
+
+    <aside class="inspector panel" id="inspector" hidden aria-label="Inspector">
+      <header class="panel-head">
+        <span class="kind-badge" id="inspector-kind"></span>
+        <h2 id="inspector-title"></h2>
+        <button class="btn icon-btn btn-small" id="inspector-focus" type="button" aria-label="Fly to" title="Fly to">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+        </button>
+        <button class="btn icon-btn btn-small" id="inspector-close" type="button" aria-label="Close" title="Close (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </header>
+      <div class="inspector-body" id="inspector-body"></div>
+    </aside>
+
+    <div class="tooltip" id="tooltip" hidden>
+      <span class="kind-badge" data-slot="kind"></span>
+      <strong data-slot="label"></strong>
+      <span class="tooltip-sub" data-slot="sub"></span>
+    </div>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+  </main>
+
+  <dialog class="settings" id="settings">
+    <form method="dialog" id="settings-form">
+      <header class="panel-head">
+        <h2>Settings</h2>
+        <span class="settings-path" id="settings-path"></span>
+      </header>
+      <div class="settings-body" id="settings-body"></div>
+      <footer class="settings-foot">
+        <span class="settings-error" id="settings-error" role="alert"></span>
+        <button class="btn" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" id="settings-save" value="save" type="submit">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- ============================================================ templates -->
+  <template id="tpl-message">
+    <article class="msg">
+      <header class="msg-head"><span data-slot="role"></span><span class="msg-time" data-slot="time"></span></header>
+      <div class="msg-body" data-slot="body"></div>
+      <div class="recall-chips" data-slot="chips"></div>
+      <footer class="msg-meta" data-slot="meta"></footer>
+    </article>
+  </template>
+
+  <template id="tpl-chip">
+    <button class="chip" type="button"><span class="chip-dot"></span><span data-slot="label"></span></button>
+  </template>
+
+  <template id="tpl-legend-item">
+    <li><span class="swatch" data-slot="swatch"></span><span data-slot="label"></span></li>
+  </template>
+
+  <template id="tpl-search-result">
+    <li><button type="button"><span class="kind-badge" data-slot="kind"></span><span data-slot="label"></span></button></li>
+  </template>
+
+  <template id="tpl-section">
+    <section class="insp-section"><h3 data-slot="title"></h3><div data-slot="content"></div></section>
+  </template>
+
+  <template id="tpl-kv">
+    <div class="kv"><span class="kv-key" data-slot="key"></span><span class="kv-value" data-slot="value"></span></div>
+  </template>
+
+  <template id="tpl-link-row">
+    <li><button type="button" class="link-row"><span data-slot="label"></span><span class="link-meta" data-slot="meta"></span></button></li>
+  </template>
+
+  <template id="tpl-file-reader">
+    <div class="reader">
+      <div class="reader-actions">
+        <button class="btn btn-small" type="button" data-slot="open">Open in editor</button>
+        <span class="reader-size" data-slot="size"></span>
+      </div>
+      <pre class="reader-text" data-slot="text"></pre>
+    </div>
+  </template>
+
+  <template id="tpl-setting-section">
+    <fieldset class="setting-section"><legend data-slot="title"></legend><div class="setting-grid" data-slot="fields"></div></fieldset>
+  </template>
+
+  <template id="tpl-setting-field">
+    <label class="setting-field"><span class="setting-label" data-slot="label"></span><span class="setting-control" data-slot="control"></span><span class="setting-help" data-slot="help"></span></label>
+  </template>
+
+  <template id="tpl-toast">
+    <div class="toast"><span data-slot="text"></span></div>
+  </template>
+
+  <!-- tabs -->
+  <template id="tpl-card">
+    <section class="card"><header class="card-head"><h3 data-slot="title"></h3><span class="card-aside" data-slot="aside"></span></header><div class="card-body" data-slot="body"></div></section>
+  </template>
+
+  <template id="tpl-model-row">
+    <label class="choice-row"><input type="radio" name="model-choice"><span class="choice-main"><span class="choice-title" data-slot="title"></span><span class="choice-sub" data-slot="sub"></span></span><span class="choice-tag" data-slot="tag"></span></label>
+  </template>
+
+  <template id="tpl-status-line">
+    <div class="status-line"><span class="status-dot"></span><span class="status-text" data-slot="text"></span></div>
+  </template>
+
+  <template id="tpl-field">
+    <label class="form-field"><span class="form-label" data-slot="label"></span><span class="form-control" data-slot="control"></span><span class="form-help" data-slot="help"></span></label>
+  </template>
+
+  <template id="tpl-tool-row">
+    <li class="tool-row"><span class="status-dot"></span><span class="tool-main"><span class="tool-title" data-slot="title"></span><span class="tool-sub" data-slot="sub"></span></span><span class="tool-tag" data-slot="tag"></span></li>
+  </template>
+
+  <template id="tpl-gate-row">
+    <li class="gate-row"><span class="status-dot"></span><span class="gate-name" data-slot="name"></span><span class="gate-detail" data-slot="detail"></span></li>
+  </template>
+
+  <template id="tpl-label">
+    <div class="scene-label"><span data-slot="text"></span></div>
+  </template>
+</body>
+</html>

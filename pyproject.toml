@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "somni-studio"
+version = "0.4.0"
+description = "A live 3D view of a Somni model's brain and memory, and a place to talk to it."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "websockets>=13",
+]
+
+[project.optional-dependencies]
+# The in-process Somni model (live brain telemetry). Install torch for your GPU first
+# (see the Somni README); these are the rest of what Somni's HFStudent needs.
+model = ["transformers>=4.51", "accelerate", "safetensors", "peft", "numpy"]
+# On-device text-to-speech (CPU). Then: python scripts/fetch_voice.py
+voice = ["kokoro-onnx==0.6.1"]
+# On-device speech recognition (CPU, its own process). Then: python scripts/fetch_listen.py
+listen = ["faster-whisper==1.2.1"]
+dev = ["httpx>=0.27"]
+
+[project.scripts]
+somni-studio = "somni_studio.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["somni_studio*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101", "S603", "S607", "S608"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]          # FastAPI's dependency-injection idiom
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]                          # fixtures use fake credentials on purpose

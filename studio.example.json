@@ -1,0 +1,54 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "somni": {
+    "repo": "../somni",
+    "home": "data/home",
+    "adapter": "",
+    "read_only": false,
+    "use_tags": true
+  },
+  "provider": {
+    "kind": "somni",
+    "url": "http://127.0.0.1:1234",
+    "model": "",
+    "max_new_tokens": 256,
+    "dtype": "auto",
+    "model_dirs": ""
+  },
+  "voice": {
+    "enabled": true,
+    "voice": "af_heart",
+    "speed": 1.0,
+    "blend": "",
+    "blend_amount": 0.0,
+    "effect": "none",
+    "pause": 0.0,
+    "threads": 4,
+    "model_dir": "data/models/tts"
+  },
+  "listen": {
+    "enabled": true,
+    "model": "base.en",
+    "threads": 4,
+    "wake_word": "somni",
+    "model_dir": "data/models/stt"
+  },
+  "tools": {
+    "enabled": true,
+    "allowed_domains": "light,switch,fan,media_player,scene,climate,input_boolean",
+    "max_rounds": 3
+  },
+  "gpu": {
+    "auto_pause": true,
+    "busy_percent": 40.0,
+    "resume_after_s": 60.0,
+    "ignore": ""
+  },
+  "graph": {
+    "poll_seconds": 2.0,
+    "max_memories": 20000
+  }
+}
