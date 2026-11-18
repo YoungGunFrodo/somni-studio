@@ -125,6 +125,16 @@ drawer.register("voice", new VoiceTab({ hud, saveSettings, speaker,
   onListenChanged: (status) => voiceInput.configure(status) }));
 drawer.register("connections", new ConnectionsTab({ hud, refresh: refreshDrawer }));
 drawer.register("tools", new ToolsTab({ refresh: refreshDrawer }));
+
+// Back from "Sign in with Home Assistant": say how it went and show the card.
+const signedIn = new URLSearchParams(window.location.search).get("signin");
+if (signedIn) {
+  history.replaceState(null, "", window.location.pathname);
+  const words = { connected: ["Home Assistant connected", "good"], failed: ["Home Assistant sign-in failed", "error"],
+    expired: ["That sign-in expired; try again", "error"] }[signedIn] ?? ["Home Assistant sign-in finished", "good"];
+  hud.toast(...words);
+  drawer.open("connections");
+}
 const inspector = new Inspector({ store, hud, onSelect: select, onFocus: fly, onClose: deselect });
 const chat = new Chat({
   socket,

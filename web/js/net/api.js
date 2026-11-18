@@ -63,6 +63,8 @@ export const api = {
   removeConnection: (id) => request("DELETE", `/api/connections/${encodeURIComponent(id)}`),
   tools: () => request("GET", "/api/tools"),
   discoverHomeAssistant: () => request("POST", "/api/connections/home_assistant/discover"),
+  homeAssistantVm: () => request("GET", "/api/connections/home_assistant/vm"),
+  homeAssistantVmControl: (action) => request("POST", `/api/connections/home_assistant/vm/${action}`),
 
   speech: () => request("GET", "/api/speech"),
   previewSpeech: (text, style) => request("POST", "/api/speech/preview", { text, ...style }),

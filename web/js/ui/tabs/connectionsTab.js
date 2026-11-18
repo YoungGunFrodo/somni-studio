@@ -87,9 +87,37 @@ export class ConnectionsTab {
     }));
     const extras = c.id === HOME_ASSISTANT ? this.#homeAssistantHelpers(inputs.get("url")) : [];
     body.appendChild(row(save, test, ...extras, remove));
+    if (c.id === HOME_ASSISTANT) {
+      if (c.values.signed_in) body.appendChild(para("Signed in to Home Assistant; Somni keeps the sign-in fresh."));
+      body.appendChild(this.#vmBox());
+    }
   }
 
-  /** Home Assistant: find it on the network, and open the page where tokens are made. */
+  /** Home Assistant's VM on this PC (Somni starts it with itself): its state, start and stop. */
+  #vmBox() {
+    const box = el("div", { className: "vm-box" });
+    const draw = (vm) => {
+      box.replaceChildren();
+      if (!vm.vm) {
+        if (vm.virtualbox) box.appendChild(para("No Home Assistant virtual machine on this PC."));
+        return;
+      }
+      const running = vm.state === "running";
+      box.appendChild(statusLine(running ? "connected" : "not_configured",
+        `Virtual machine "${vm.vm}": ${vm.state}. Somni starts it whenever Somni starts.`));
+      const toggle = button(running ? "Stop Home Assistant" : "Start Home Assistant", { danger: running });
+      toggle.addEventListener("click", () => busy(toggle, this.hud, async () => {
+        draw(await api.homeAssistantVmControl(running ? "stop" : "start"));
+        this.hud.toast(running ? "Home Assistant is shutting down" : "Home Assistant is starting (about a minute)",
+          "good");
+      }, running ? "Stopping…" : "Starting…"));
+      box.appendChild(row(toggle));
+    };
+    api.homeAssistantVm().then(draw).catch(() => {});
+    return box;
+  }
+
+  /** Home Assistant: find it on the network, sign in on its own page (no token to copy). */
   #homeAssistantHelpers(urlInput) {
     const find = button("Find on my network");
     find.addEventListener("click", () => busy(find, this.hud, async () => {
@@ -98,16 +126,16 @@ export class ConnectionsTab {
       urlInput.value = found[0];
       this.hud.toast(`found Home Assistant at ${found[0]}`, "good");
     }, "Looking…"));
-    const tokenPage = button("Open token page");
-    tokenPage.addEventListener("click", () => {
+    const signIn = button("Sign in with Home Assistant", { primary: true });
+    signIn.addEventListener("click", () => {
       const base = urlInput.value.trim().replace(/\/+$/, "");
       if (!/^https?:\/\//.test(base)) {
         this.hud.toast("enter or find the Home Assistant address first", "error");
         return;
       }
-      window.open(`${base}/profile/security`, "_blank", "noopener");
+      window.location.href = `/api/connections/home_assistant/signin?url=${encodeURIComponent(base)}`;
     });
-    return [find, tokenPage];
+    return [find, signIn];
   }
 
   /** A card whose status comes from another connection (Google Home through Home Assistant). */

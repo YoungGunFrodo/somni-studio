@@ -123,6 +123,42 @@ def say_on_speaker(speech: SpeechService, devices: DeviceHub, device, message: s
     devices.play(device, share_once(audio, link["address"]), "Somni")
 
 
+HA_BOOT_WAIT_S = 240
+
+
+async def start_home_assistant(connections) -> None:
+    """Start the Home Assistant VM (if there is one) and check the connections once it answers."""
+    from ..integrations import ha_vm
+    config = connections.config("home_assistant")
+    try:
+        vm = await asyncio.to_thread(ha_vm.find_vm, config.get("vm", ""))
+        if vm is not None and await asyncio.to_thread(ha_vm.state, vm) != "running":
+            log.info("starting the Home Assistant VM %r", vm)
+            await asyncio.to_thread(ha_vm.start, vm)
+            await _wait_for_home_assistant(config.get("url") or "http://homeassistant.local:8123")
+    except Exception as exc:                        # a VM problem must never stop the studio
+        log.warning("could not start the Home Assistant VM: %s", exc)
+    await asyncio.to_thread(connections.check_all)
+
+
+async def _wait_for_home_assistant(url: str) -> None:
+    import urllib.error
+    import urllib.request
+
+    def answers() -> bool:
+        try:
+            urllib.request.urlopen(url.rstrip("/") + "/api/", timeout=3)  # noqa: S310 - the configured address
+        except urllib.error.HTTPError as exc:
+            return exc.code == 401                  # up (and wants a token)
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
+        return True
+    loop = asyncio.get_running_loop()
+    end = loop.time() + HA_BOOT_WAIT_S
+    while loop.time() < end and not await asyncio.to_thread(answers):
+        await asyncio.sleep(5)
+
+
 def system_info(studio) -> dict:
     """Somni's own systems, for its system_status tool."""
     import sqlite3
@@ -196,7 +232,7 @@ def create_app(settings: StudioSettings, settings_path: Path, provider_factory=m
         studio.graph.start()
         studio.gpu.start()
         speech.warm_up()
-        background.add(asyncio.create_task(asyncio.to_thread(connections.check_all)))
+        background.add(asyncio.create_task(start_home_assistant(connections)))
         background.add(asyncio.create_task(asyncio.to_thread(studio.listen.warm_up)))
         try:
             yield

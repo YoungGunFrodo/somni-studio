@@ -67,11 +67,12 @@ class ValuesTest(unittest.TestCase):
     def test_secrets_are_kept_and_never_shown(self):
         ha = HomeAssistant()
         values = clean_values(ha, {"url": " http://h:8123 ", "token": "abc"}, {})
-        self.assertEqual(values, {"url": "http://h:8123", "token": "abc"})
+        self.assertEqual({k: values[k] for k in ("url", "token")}, {"url": "http://h:8123", "token": "abc"})
         again = clean_values(ha, {"url": "http://h:8123", "token": ""}, values)
         self.assertEqual(again["token"], "abc", "an empty secret keeps the stored one")
         shown = public_values(ha, again)
-        self.assertEqual(shown, {"url": "http://h:8123", "token": "", "token_set": True})
+        self.assertEqual(shown, {"url": "http://h:8123", "token": "", "token_set": True, "vm": "",
+                                 "signed_in": False})
 
     def test_validation(self):
         with self.assertRaisesRegex(ValueError, "required"):

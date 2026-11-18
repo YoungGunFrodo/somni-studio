@@ -102,7 +102,7 @@ def clean_values(integ: Integration, values: dict, previous: dict) -> dict:
     out = {}
     for key, f in known.items():
         value = values.get(key, previous.get(key, f.default))
-        if f.kind is FieldKind.SECRET and (value is None or value == ""):
+        if (f.kind is FieldKind.SECRET or f.hidden) and (value is None or value == ""):
             value = previous.get(key, "")
         if f.kind is FieldKind.CHOICE and value not in f.options:
             raise ValueError(f"{f.label} must be one of {', '.join(f.options)}")
@@ -123,6 +123,9 @@ def public_values(integ: Integration, values: dict) -> dict:
     """Stored values safe to show: secrets become a flag."""
     out = {}
     for f in integ.fields:
+        if f.hidden:                              # sign-in data: only whether it exists
+            out["signed_in"] = out.get("signed_in", False) or bool(values.get(f.key)) and f.kind is FieldKind.SECRET
+            continue
         if f.kind is FieldKind.SECRET:
             out[f.key] = ""
             out[f.key + "_set"] = bool(values.get(f.key))
@@ -189,6 +192,15 @@ class ConnectionsService:
                 self.check(integ.id)
 
     on_change: Callable[[str, str], None] | None = None   # (thing, sentence): becomes a memory
+
+    def sign_in(self, integration_id: str, values: dict) -> Status:
+        """Store what a sign-in produced (hidden fields included) and check the connection."""
+        integ = _by_id(integration_id)
+        self.store.put(integ.id, {**self.store.get(integ.id), **values})
+        status = self.check(integ.id)
+        if status.state is State.CONNECTED:
+            self._changed(integ, f"Somni is connected to {self._described(integ)}.")
+        return status
 
     def save(self, integration_id: str, values: dict) -> Status:
         integ = _by_id(integration_id)

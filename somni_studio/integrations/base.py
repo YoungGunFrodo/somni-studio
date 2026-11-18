@@ -25,6 +25,7 @@ class Field:
     default: Any = ""
     required: bool = True
     options: tuple[str, ...] = ()
+    hidden: bool = False             # stored, never shown or sent to the browser (sign-in data)
 
     def to_wire(self) -> dict:
         return {**asdict(self), "kind": self.kind.value, "options": list(self.options)}
@@ -84,7 +85,7 @@ class Integration:
 
     def to_wire(self) -> dict:
         return {"id": self.id, "title": self.title, "category": self.category, "description": self.description,
-                "fields": [f.to_wire() for f in self.fields], "examples": list(self.examples),
+                "fields": [f.to_wire() for f in self.fields if not f.hidden], "examples": list(self.examples),
                 "setup": list(self.setup), "derived_from": self.derived_from,
                 "tools": [{"name": t.name, "title": t.title, "description": t.description,
                            "invocation": t.invocation.value} for t in self.tools]}

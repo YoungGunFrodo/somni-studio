@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 
@@ -28,6 +30,42 @@ def _get(url: str, token: str, path: str):
     return _request(url, token, path)
 
 
+_access: dict = {}                    # (url, refresh token) -> (access token, expires at)
+
+
+def token_for(config: dict) -> str:
+    """The token to call Home Assistant with: a pasted long-lived token, or a short-lived one from the
+    "Sign in with Home Assistant" refresh token (renewed before it expires)."""
+    if config.get("token"):
+        return config["token"]
+    refresh, url = config.get("refresh_token") or "", (config.get("url") or "").rstrip("/")
+    if not refresh:
+        raise CheckFailed("not signed in: press 'Sign in with Home Assistant'")
+    cached = _access.get((url, refresh))
+    if cached and cached[1] > time.time() + 60:
+        return cached[0]
+    reply = auth_token(url, {"grant_type": "refresh_token", "refresh_token": refresh,
+                             "client_id": config.get("client_id") or ""})
+    _access[(url, refresh)] = (reply["access_token"], time.time() + int(reply.get("expires_in", 1800)))
+    return reply["access_token"]
+
+
+def auth_token(url: str, form: dict) -> dict:
+    """Home Assistant's /auth/token (sign-in codes and refresh tokens, as a form post)."""
+    if not url.startswith(("http://", "https://")):
+        raise CheckFailed("the server address must start with http:// or https://")
+    req = urllib.request.Request(url.rstrip("/") + "/auth/token",  # noqa: S310 - scheme checked above
+                                 data=urllib.parse.urlencode(form).encode(), method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:  # noqa: S310 - scheme checked above
+            return json.loads(r.read())
+    except urllib.error.HTTPError:
+        raise CheckFailed("Home Assistant refused the sign-in; sign in again") from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise CheckFailed(f"cannot reach Home Assistant at {url}: {getattr(exc, 'reason', exc)}") from None
+
+
 def _friendly(state: dict) -> dict:
     attrs = state.get("attributes") or {}
     out = {"entity_id": state.get("entity_id"), "name": attrs.get("friendly_name") or state.get("entity_id"),
@@ -46,7 +84,13 @@ class HomeAssistant(Integration):
     fields = (
         Field("url", "Server address", FieldKind.URL, "http://homeassistant.local:8123"),
         Field("token", "Long-lived access token", FieldKind.SECRET, "",
-              "Home Assistant → your profile → Security → Long-lived access tokens → Create token."),
+              "Not needed if you use 'Sign in with Home Assistant'. Otherwise: your profile → Security → "
+              "Long-lived access tokens → Create token.", required=False),
+        Field("vm", "VirtualBox VM", FieldKind.TEXT, "Home Assistant",
+              "If Home Assistant runs in a VirtualBox VM on this PC, Somni starts it with itself. Empty: any VM "
+              "whose name contains 'Home Assistant'.", required=False),
+        Field("refresh_token", "Sign-in", FieldKind.SECRET, required=False, hidden=True),
+        Field("client_id", "Sign-in client", FieldKind.TEXT, required=False, hidden=True),
     )
     tools = (
         ToolSpec("home.states", "See device states", "Read what every light, switch and sensor is doing."),
@@ -59,12 +103,13 @@ class HomeAssistant(Integration):
         "Assistant is for the rest: Zigbee and Z-Wave sensors, thermostats, locks, cloud-only brands.",
         "No Home Assistant yet? Install it on a spare PC, a Raspberry Pi or Home Assistant Green "
         "(home-assistant.io/installation), then add your devices there.",
-        "Press 'Find on my network' (or type its address), open the token page, create a long-lived "
-        "access token, paste it here and press Connect.",
+        "Press 'Find on my network' (or type its address), then 'Sign in with Home Assistant' and log in. "
+        "That's all: Somni keeps itself signed in.",
     )
 
     def check(self, config: dict) -> Status:
-        url, token = (config.get("url") or "").strip(), config.get("token") or ""
+        url = (config.get("url") or "").strip()
+        token = token_for(config)
         if not url.startswith(("http://", "https://")):
             raise CheckFailed("the server address must start with http:// or https://")
         try:
@@ -89,7 +134,7 @@ class HomeAssistant(Integration):
     def google_command(self, config: dict, command: str) -> dict:
         """Send a command to Google Assistant (Home Assistant's Google Assistant SDK integration), so
         devices only Google Home knows can be controlled too."""
-        _request(config["url"], config["token"], "/api/services/google_assistant_sdk/send_text_command",
+        _request(config["url"], token_for(config), "/api/services/google_assistant_sdk/send_text_command",
                  {"command": command})
         return {"sent": command}
 
@@ -110,7 +155,7 @@ class HomeAssistant(Integration):
     # ------------------------------------------------------------ actions (used by tools)
     def states(self, config: dict, search: str = "", domain: str = "", limit: int = 40) -> list[dict]:
         """Devices and their states, filtered by a name/id search and/or a domain (light, switch...)."""
-        rows = _request(config["url"], config["token"], "/api/states") or []
+        rows = _request(config["url"], token_for(config), "/api/states") or []
         words = [w for w in search.lower().split() if w not in ("the", "a", "my", "all", "lights", "light")]
         out = []
         for s in rows:
@@ -127,6 +172,7 @@ class HomeAssistant(Integration):
         """Call a service on one entity (turn_on, turn_off, toggle...) and return its new state."""
         domain = entity_id.split(".", 1)[0]
         body = {"entity_id": entity_id, **(data or {})}
-        _request(config["url"], config["token"], f"/api/services/{domain}/{action}", body)
-        state = _request(config["url"], config["token"], f"/api/states/{entity_id}")
+        token = token_for(config)
+        _request(config["url"], token, f"/api/services/{domain}/{action}", body)
+        state = _request(config["url"], token, f"/api/states/{entity_id}")
         return _friendly(state) if isinstance(state, dict) else {"entity_id": entity_id}
