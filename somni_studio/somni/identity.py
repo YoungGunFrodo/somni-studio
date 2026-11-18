@@ -35,9 +35,10 @@ def core_memories(model: str) -> list[tuple[str, str, str]]:
          "remembers conversations and learns from them while it sleeps.",
          "a personal home assistant that remembers and learns while it sleeps"),
         ("somni/creator",
-         "The user built Somni's interface (Somni Studio) and its memory framework. The language model "
-         "underneath is made by someone else and can be swapped; the memories stay.",
-         "the user built Somni's interface and memory framework"),
+         "Somni is built from Somni Studio (its interface) and the Somni sleep-learning memory framework, both "
+         "open source. The language model underneath is made by someone else and can be swapped; the "
+         "memories stay.",
+         "Somni Studio and the Somni framework, open source; the model can be swapped"),
         ("somni/base-model", f"Somni currently thinks with the {name} language model.", name),
         ("somni/connections",
          "When the user asks, Somni can look for smart lights, plugs, speakers, displays and TVs on the home "
