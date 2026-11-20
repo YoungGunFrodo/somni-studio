@@ -13,6 +13,18 @@ from .base import CheckFailed, Field, FieldKind, Integration, State, Status, Too
 
 TIMEOUT_S = 6
 CANDIDATES = ("http://homeassistant.local:8123", "http://homeassistant:8123", "http://localhost:8123")
+MDNS_SERVICE = "_home-assistant._tcp.local"
+
+
+def _announced(timeout: float = 2.0) -> list[str]:
+    """Home Assistant instances announcing themselves on the LAN (mDNS), as http://<ip>:<port>."""
+    from ..devices import net
+    try:
+        replies = net.mdns(timeout, (MDNS_SERVICE,))
+    except OSError:
+        return []
+    return [f"http://{ip}:{info['ports'].get(MDNS_SERVICE, 8123)}" for ip, info in replies.items()
+            if MDNS_SERVICE in info["services"] or MDNS_SERVICE in info["ports"]]
 
 
 def _request(url: str, token: str, path: str, body: dict | None = None):
@@ -73,6 +85,16 @@ def _friendly(state: dict) -> dict:
     for key in ("brightness", "temperature", "current_temperature", "unit_of_measurement", "media_title"):
         if key in attrs and attrs[key] is not None:
             out[key] = attrs[key]
+    if state.get("state") == "on" and str(state.get("entity_id", "")).startswith("light."):
+        from ..devices import colors
+        if attrs.get("effect") and str(attrs["effect"]).lower() not in ("none", "off"):
+            out["scene"] = attrs["effect"]
+        elif attrs.get("color_mode") == "color_temp" and attrs.get("color_temp_kelvin"):
+            out["color"] = colors.describe_kelvin(int(attrs["color_temp_kelvin"]))
+        elif attrs.get("rgb_color"):
+            out["color"] = colors.describe_xy(*colors.rgb_to_xy(*attrs["rgb_color"][:3]))
+        if attrs.get("effect_list"):
+            out["scenes"] = len(attrs["effect_list"])
     return out
 
 
@@ -139,12 +161,19 @@ class HomeAssistant(Integration):
         return {"sent": command}
 
     @staticmethod
-    def discover() -> list[str]:
-        """Home Assistant addresses that answer on this network (its API replies 401 without a token)."""
+    def discover(hint: str = "") -> list[str]:
+        """Home Assistant addresses that answer on this network (its API replies 401 without a token).
+
+        Tries the address already typed in, Home Assistant's own mDNS announcement (by IP address, so
+        it works where the PC can't resolve "homeassistant.local", as on many Windows PCs), then the
+        usual names."""
+        bases = [hint.rstrip("/")] if hint.startswith(("http://", "https://")) else []
+        bases += _announced()
+        bases += CANDIDATES
         found = []
-        for base in CANDIDATES:
+        for base in dict.fromkeys(bases):
             try:
-                urllib.request.urlopen(base + "/api/", timeout=2)  # noqa: S310 - fixed local candidates
+                urllib.request.urlopen(base + "/api/", timeout=2)  # noqa: S310 - typed, announced or fixed local
             except urllib.error.HTTPError as exc:
                 if exc.code == 401:
                     found.append(base)
@@ -157,16 +186,34 @@ class HomeAssistant(Integration):
         """Devices and their states, filtered by a name/id search and/or a domain (light, switch...)."""
         rows = _request(config["url"], token_for(config), "/api/states") or []
         words = [w for w in search.lower().split() if w not in ("the", "a", "my", "all", "lights", "light")]
+        in_room = self.rooms(config)
         out = []
         for s in rows:
             entity = str(s.get("entity_id", ""))
             if domain and not entity.startswith(domain.lower() + "."):
                 continue
-            name = f"{entity} {(s.get('attributes') or {}).get('friendly_name', '')}".lower()
+            room = in_room.get(entity, "")
+            name = f"{entity} {(s.get('attributes') or {}).get('friendly_name', '')} {room}".lower()
             if words and not all(w in name for w in words):
                 continue
-            out.append(_friendly(s))
+            row = _friendly(s)
+            if room:
+                row["room"] = room
+            out.append(row)
         return out[:limit]
+
+    @staticmethod
+    def rooms(config: dict) -> dict[str, str]:
+        """entity_id -> room; empty if Home Assistant has no rooms set up (or can't say)."""
+        from .ha_features import rooms
+        try:
+            return rooms(config)
+        except (CheckFailed, OSError, ValueError):
+            return {}
+
+    def attributes(self, config: dict, entity_id: str) -> dict:
+        state = _request(config["url"], token_for(config), f"/api/states/{entity_id}")
+        return (state or {}).get("attributes") or {} if isinstance(state, dict) else {}
 
     def call(self, config: dict, entity_id: str, action: str, data: dict | None = None) -> dict:
         """Call a service on one entity (turn_on, turn_off, toggle...) and return its new state."""

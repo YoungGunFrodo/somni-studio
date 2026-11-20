@@ -116,6 +116,12 @@ def could_be_tool_call(text: str) -> bool:
 
 
 # ---------------------------------------------------------------- local model
+# The prompt is read this many tokens at a time. Read in one go, attention needs memory that grows
+# with the square of the prompt (a 6000-token prompt: several GB on top of the model); in pieces it
+# stays small and flat, which is what lets a small machine run this.
+PREFILL_CHUNK = 512
+
+
 class LocalBackend:
     """The in-process model, through its chat template's tool support."""
 
@@ -140,10 +146,21 @@ class LocalBackend:
         ectx = getattr(self.model, "_expert_ctx", None)
         if ectx is not None:
             ectx["off"], ectx["route"] = True, None          # the base model reads and writes tool calls
+        from . import gpu_memory
+        chunk = {"prefill_chunk_size": PREFILL_CHUNK} if start > PREFILL_CHUNK else {}
         try:
             with torch.no_grad():
                 out = self.model.generate(**enc, max_new_tokens=max_new, do_sample=False,
-                                          pad_token_id=self.tok.pad_token_id, stopping_criteria=stops)
+                                          pad_token_id=self.tok.pad_token_id, stopping_criteria=stops, **chunk)
+        except RuntimeError as exc:
+            if not gpu_memory.is_oom(exc):
+                raise
+            log.warning("out of graphics memory on a %d-token prompt (%s): %s", start, gpu_memory.usage(), exc)
+            del enc
+            gpu_memory.release()
+            raise gpu_memory.OutOfGraphicsMemory(
+                "I ran out of graphics memory on that one, sir. Other programs may be using the graphics "
+                "card; closing them, or asking more simply, should help.") from None
         finally:
             if ectx is not None:
                 ectx["off"] = False
@@ -239,6 +256,8 @@ class ServerBackend:
 class AgentResult:
     text: str
     calls: list[CallRecord]
+    messages: list[dict] = field(default_factory=list)    # from the request on, corrections taken out
+    corrections: list[dict] = field(default_factory=list)  # what Somni had to be corrected for
 
 
 def system_message(context: list, devices: list[str] = (), states: list[dict] = (), notes: list[str] = ()) -> dict:
@@ -260,18 +279,67 @@ def system_message(context: list, devices: list[str] = (), states: list[dict] = 
 
 
 def _unfinished(records: list[CallRecord]) -> str | None:
-    """A tool that failed and was not tried again, although another tool succeeded after it."""
+    """What is left to do, as a note to the model, or None:
+    - a tool that failed and was not tried again, although another tool succeeded after it;
+    - a next step a tool said the request needs ("then"), not taken (measured: asked to name the new
+      bulb, a 4B model scanned, saw it, and asked the user which bulb they meant)."""
     for i, record in enumerate(records):
         later = records[i + 1:]
         if (not record.ok and any(r.ok for r in later)
                 and not any(r.name == record.name and r.ok for r in later)):
-            return record.name
+            return f"you now have what {record.name} needed. Call {record.name} again, then answer my question."
+        then = record.result.get("then") if record.ok and isinstance(record.result, dict) else None
+        if isinstance(then, dict) and not any(r.name == then.get("tool") for r in later):
+            return f"{then.get('say', '')} Call {then.get('tool')} now, then answer my question.".strip()
     return None
+
+
+DEVICE_WORDS = re.compile(r"\b(lights?|lamps?|bulbs?|plugs?|switch(es)?|speakers?|displays?|tv|roku|thermostat|"
+                          r"heating|fan|locks?|doors?|blinds?|music|radio|volume|scene|cozy|room|office|bedroom|"
+                          r"kitchen|living room|bathroom|garage|hall|downstairs|upstairs|them|they|it)\b", re.I)
+
+
+def _wants_action(question: str, device_names: list[str] = ()) -> bool:
+    """A request to change something in the house (not 'write a poem on love')."""
+    from ..tools.catalog import asked_to_act
+    if not asked_to_act(question):
+        return False
+    words = set(re.findall(r"[a-z0-9]+", question.lower()))
+    named = any(w in words for name in device_names for w in re.findall(r"[a-z]{4,}", name.split("(")[0].lower()))
+    return named or bool(DEVICE_WORDS.search(question))
+
+
+def _not_done(question: str, records: list[CallRecord]) -> str | None:
+    """The user asked for something to be done, the model only looked (measured: "turn the office
+    lights off" -> home_states -> "I've turned off both lights", and they were still on)."""
+    from ..tools.catalog import asked_to_act
+    if not records or not asked_to_act(question):
+        return None
+    if any(r.name in BY_NAME and BY_NAME[r.name].acts for r in records):
+        return None                                    # it acted (a failure is handled by _honest)
+    return ("you only looked; nothing has been done yet. Call the tool that does what I asked (for several "
+            "devices or a whole room at once: home_assist), then answer. Never say it is done before it is.")
 
 
 class ToolAgent:
     def __init__(self, backend: Backend, ctx: ToolContext, emit: Emitter, max_rounds: int = 3) -> None:
         self.backend, self.ctx, self.emit, self.max_rounds = backend, ctx, emit, max_rounds
+        self.corrections: list[dict] = []
+        self._dropped: set[int] = set()
+        self._start = 0
+
+    def _correct(self, kind: str, step: Step | None, messages: list[dict]) -> None:
+        """Note a mistake, and add the wrong step plus the correction to follow, both left out of the
+        clean lesson (messages[_start:] without them is what doing it right looks like)."""
+        wrong = (step.text if step is not None and step.text else
+                 [c["name"] for c in step.calls] if step is not None and step.calls else "")
+        self.corrections.append({"kind": kind, "wrong": wrong})
+        self._dropped.update({len(messages), len(messages) + 1})
+        messages.append({"role": "assistant", "content": step.text if step is not None and step.text else ""})
+
+    def _result(self, text: str, records: list[CallRecord], messages: list[dict]) -> AgentResult:
+        clean = [m for i, m in enumerate(messages) if i >= self._start and i not in self._dropped]
+        return AgentResult(text, records, clean + [{"role": "assistant", "content": text}], list(self.corrections))
 
     def _honest(self, step: Step, records: list[CallRecord], messages: list[dict], schemas: list[dict]) -> Step:
         """Every action failed: the answer must say so (measured: after two failed device calls a 4B
@@ -282,7 +350,7 @@ class ToolAgent:
             return step
         failures = "; ".join(f"{r.name}: {r.error}" for r in acted)
         self.emit(EventType.TOKEN, text="", replace=True)
-        messages.append({"role": "assistant", "content": step.text or ""})
+        self._correct("said it worked after every action failed", step, messages)
         messages.append({"role": "user", "content": f"(That did not happen: every action failed ({failures}). "
                          "Tell me plainly, in one or two sentences, what you could not do and why. Do not say "
                          "it worked.)"})
@@ -300,10 +368,25 @@ class ToolAgent:
         states = self.ctx.mentioned_devices(question)
         messages = with_history([system_message(context, self.ctx.device_names(), states, self.ctx.notes()),
                                  {"role": "user", "content": question}], list(history))
+        self._start = len(messages) - 1                   # the request itself
         timings = [("devices", time.perf_counter() - clock)]
         clock = time.perf_counter()
         step = Step(calls=forced) if forced else self.backend.step(messages, schemas, first=True)
         timings.append(("decide", time.perf_counter() - clock))
+        home_acts = any(t.acts and t.name.startswith(("home_", "device", "play_music", "speaker_say", "google"))
+                        for t in tools)
+        if step is None and home_acts and _wants_action(self.ctx.question or question, self.ctx.device_names()):
+            # Asked to do something, it reached for no tool (measured: "put the lights on the cozy
+            # setting" -> no tool -> "The office lights are now on the cozy setting"; nothing changed).
+            self._correct("answered without using a tool", None, messages)
+            messages.append({"role": "user", "content": "(You have not done it. Use a tool to do what I asked; "
+                             "never say something is done unless a tool did it.)"})
+            step = self.backend.step(messages, schemas, first=False)
+            timings.append(("nudge", time.perf_counter() - clock))
+            if not step.calls:
+                log.info("tool turn: %s (no tool used)", ", ".join(f"{n} {s:.1f}s" for n, s in timings))
+                return self._result("I'm afraid I couldn't find a way to do that, sir; nothing was changed.", [],
+                                    messages)
         if step is None:
             if not states:
                 return None
@@ -313,21 +396,21 @@ class ToolAgent:
         records: list[CallRecord] = []
         nudged = False
         for _round in range(self.max_rounds):
-            unfinished = None if nudged or step.calls else _unfinished(records)
+            unfinished = None if nudged or step.calls else (_unfinished(records)
+                                                            or _not_done(self.ctx.question or question, records))
             if unfinished:
                 # It gathered what a failed tool needed, then answered without using it (measured:
                 # weather -> "needs a town" -> computer_info -> "the weather is not available").
                 nudged = True
                 self.emit(EventType.TOKEN, text="", replace=True)
-                messages.append({"role": "assistant", "content": step.text or ""})
-                messages.append({"role": "user", "content": f"(Not finished: you now have what {unfinished} "
-                                 f"needed. Call {unfinished} again, then answer my question.)"})
+                self._correct("stopped before finishing", step, messages)
+                messages.append({"role": "user", "content": f"(Not finished: {unfinished})"})
                 step = self.backend.step(messages, schemas, first=False)
                 timings.append(("nudge", 0.0))
             if not step.calls:
                 step = self._honest(step, records, messages, schemas)
                 log.info("tool turn: %s", ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings))
-                return AgentResult(step.text or "", records)
+                return self._result(step.text or "", records, messages)
             ids = [f"call_{len(records) + i}" for i in range(len(step.calls))]
             messages.append({"role": "assistant", "content": "", "tool_calls": [
                 {"id": cid, "type": "function",
@@ -350,6 +433,6 @@ class ToolAgent:
             step = self._honest(step, records, messages, schemas)
         log.info("tool turn: %s", ", ".join(f"{name} {seconds:.1f}s" for name, seconds in timings))
         if step.calls:                                      # still asking for tools: stop here
-            return AgentResult("I tried, but it took too many steps. Here is what I did: "
-                               + "; ".join(r.summary() for r in records), records)
-        return AgentResult(step.text or "", records)
+            return self._result("I tried, but it took too many steps. Here is what I did: "
+                                + "; ".join(r.summary() for r in records), records, messages)
+        return self._result(step.text or "", records, messages)

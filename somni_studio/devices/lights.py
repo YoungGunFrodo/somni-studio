@@ -14,8 +14,8 @@ import json
 import socket
 import struct
 
-from . import net
-from .base import Device, DeviceError, Driver, Found, NeedsUser
+from . import colors, net
+from .base import Command, Device, DeviceError, Driver, Found, NeedsUser
 
 
 def _pct(value: int | None, low: int = 1) -> int | None:
@@ -48,10 +48,38 @@ class Wiz(Driver):
             raise DeviceError(f"the WiZ light said: {data['error'].get('message', data['error'])}")
         return data.get("result") or {}
 
+    KELVIN_MIN, KELVIN_MAX = 2200, 6500
+
     def devices(self, link):
         r = self._call(link, "getPilot")
         return [Device(self.device_id(link), link["name"], "light", bool(r.get("state")), r.get("dimming"),
-                       link=link["id"], model="WiZ")]
+                       link=link["id"], model="WiZ", color=self._color_name(r))]
+
+    @staticmethod
+    def _color_name(r: dict) -> str:
+        """What the bulb shows: a white (temp), a color (r, g, b) or one of its built-in scenes."""
+        if r.get("temp"):
+            return colors.describe_kelvin(int(r["temp"]))
+        rgb = tuple(int(r.get(k) or 0) for k in ("r", "g", "b"))
+        if any(rgb):
+            return colors.describe_xy(*colors.rgb_to_xy(*rgb))
+        return f"scene {r['sceneId']}" if r.get("sceneId") else ""
+
+    def control(self, link, sub, command):
+        if not command.color or command.action == "turn_off":
+            return super().control(link, sub, Command(command.action, command.brightness))
+        try:
+            color = colors.parse(command.color)
+        except ValueError as exc:
+            raise DeviceError(str(exc)) from None
+        params: dict = {"state": True}
+        if color.is_white:
+            params["temp"] = max(self.KELVIN_MIN, min(self.KELVIN_MAX, color.kelvin))
+        else:
+            params.update(r=color.rgb[0], g=color.rgb[1], b=color.rgb[2])
+        if command.brightness is not None:
+            params["dimming"] = _pct(command.brightness, 10)
+        self._call(link, "setPilot", params)
 
     def switch(self, link, sub, on, brightness):
         params = {}

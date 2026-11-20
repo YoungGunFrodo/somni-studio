@@ -173,6 +173,10 @@ def system_info(studio) -> dict:
                 "SELECT COUNT(*) FROM episodes WHERE formed = 0").fetchone()[0]
     except sqlite3.Error:
         pass
+    from ..engine import lessons
+    tool_turns = lessons.summary(studio.paths.home)
+    if tool_turns.get("lessons"):
+        info["tool_turns"] = tool_turns
     sleep = studio.sleep.status()
     info["sleep"] = sleep["state"] + (f", last woke {_ago(sleep['ended_at'])}" if sleep.get("ended_at") else "")
     info["voice"] = "ready" if studio.speech.status()["ready"] else "not set up"

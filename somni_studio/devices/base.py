@@ -29,6 +29,7 @@ class Command:
     brightness: int | None = None        # 1-100
     volume: int | None = None            # 0-100
     app: str = ""                        # for launch: "Netflix"
+    color: str = ""                      # "red", "warm white", "#ff8800", "2700K" (colors.parse)
 
 
 @dataclass
@@ -64,6 +65,7 @@ class Device:
     model: str = ""
     volume: int | None = None            # 0-100, speakers and displays
     detail: str = ""                     # what it is doing ("YouTube", "screensaver")
+    color: str = ""                      # what color it shows ("warm white (2700K)", "blue")
 
     @property
     def state(self) -> str:
@@ -82,6 +84,8 @@ class Device:
             row["note"] = "to start music use play_music; turn_on and play only resume what was already playing"
         if self.detail:
             row["playing"] = self.detail
+        if self.color and self.on:
+            row["color"] = self.color
         return row
 
     def to_wire(self) -> dict:
@@ -109,6 +113,8 @@ class Driver:
         """Do one command. Lights and plugs only switch (see switch); media drivers override this."""
         if command.action not in ("turn_on", "turn_off", "set"):
             raise DeviceError(f"{self.title} devices cannot {command.action.replace('_', ' ')}")
+        if command.color:
+            raise DeviceError(f"Somni cannot change the color of {self.title} lights yet")
         on = {"turn_on": True, "turn_off": False}.get(command.action)
         if command.action == "set" and command.brightness is None:
             on = True

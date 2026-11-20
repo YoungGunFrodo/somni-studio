@@ -141,8 +141,10 @@ class EngineWorker:
                 session.finish(outcome.text)
             self._set(EngineState.READY)
         except Exception as exc:
+            from .gpu_memory import OutOfGraphicsMemory
             log.exception("answering failed")
-            emit(EventType.CHAT_ERROR, message=f"{type(exc).__name__}: {exc}")
+            emit(EventType.CHAT_ERROR, message=str(exc) if isinstance(exc, OutOfGraphicsMemory)
+                 else f"{type(exc).__name__}: {exc}")
             with self._lock:
                 failed_to_load = self._provider is None
             if not failed_to_load:

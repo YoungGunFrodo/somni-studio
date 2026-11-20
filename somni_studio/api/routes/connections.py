@@ -131,7 +131,8 @@ async def discover_home_assistant(request: Request, studio: Studio = Depends(get
     """Look for Home Assistant at its usual addresses on this network."""
     require_local(request, "looking for Home Assistant")
     from ...integrations.home_assistant import HomeAssistant
-    return {"found": await asyncio.to_thread(HomeAssistant.discover)}
+    hint = str((studio.connections.config("home_assistant") or {}).get("url", ""))
+    return {"found": await asyncio.to_thread(HomeAssistant.discover, hint)}
 
 
 @router.get("/tools")

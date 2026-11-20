@@ -6,12 +6,15 @@ memory file) and reports it the moment recall finishes, before the model starts 
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
 from ..graph.memory_graph import file_id, memory_id
 from .types import RecallItem
+
+log = logging.getLogger(__name__)
 
 RecallCallback = Callable[[list[RecallItem]], None]
 
@@ -51,6 +54,26 @@ def is_profile(m) -> bool:
                                                                                                     "the-user/"))
 
 
+MIN_MATCH = 0.25         # share of the question's content words a recalled memory must contain
+
+
+def relevant(question: str, found: list) -> list:
+    """Drop search hits that barely match. The store's search returns its best hits however weak
+    (measured: "turn the office lights off" recalled a memory about the price of silver), and each
+    one lengthens the prompt and distracts a small model. A memory needs at least a quarter of the
+    question's content words (one at the least); identity and profile memories are added after."""
+    import re
+
+    from sleepai.wake.orchestrator import _STOP, match_strength
+    if not found or not [w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) > 2 and w not in _STOP]:
+        return found                                     # no content words: nothing to judge by
+    kept = [m for m in found if match_strength(question, [m]) >= MIN_MATCH]
+    dropped = len(found) - len(kept)
+    if dropped:
+        log.debug("recall: %d weak matches left out for %r", dropped, question[:60])
+    return kept
+
+
 def classify(context: list, from_tags: set[str], file_title=None) -> list[RecallItem]:
     """Recall items for the UI. `file_title(episode_id)` names memory files (else their key)."""
     out = []
@@ -77,7 +100,7 @@ def recording_orchestrator(store, student, use_tags: bool, on_recall: RecallCall
             if reused is not None and reused[0] == question:
                 return reused[1]                     # already recalled (and reported) for this question
             self._from_tags: set[str] = set()
-            context = self._with_identity(super().recall(question, k=k, files=files))
+            context = self._with_identity(relevant(question, super().recall(question, k=k, files=files)))
             self.last_recall = classify(context, self._from_tags, self._file_title)
             on_recall(self.last_recall)
             return context

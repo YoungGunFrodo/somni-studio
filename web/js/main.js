@@ -133,7 +133,8 @@ if (signedIn) {
   const words = { connected: ["Home Assistant connected", "good"], failed: ["Home Assistant sign-in failed", "error"],
     expired: ["That sign-in expired; try again", "error"] }[signedIn] ?? ["Home Assistant sign-in finished", "good"];
   hud.toast(...words);
-  drawer.open("connections");
+  // Open it once the page has settled: opened mid-start-up it could come up empty.
+  window.addEventListener("load", () => setTimeout(() => drawer.open("connections"), 300), { once: true });
 }
 const inspector = new Inspector({ store, hud, onSelect: select, onFocus: fly, onClose: deselect });
 const chat = new Chat({

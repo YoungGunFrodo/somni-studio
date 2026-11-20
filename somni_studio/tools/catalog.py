@@ -8,7 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..integrations.base import State
+from ..integrations import ha_features
+from ..integrations.base import CheckFailed, State
 from ..integrations.custom_api import CustomApi
 from ..integrations.email_imap import EmailImap
 from ..integrations.google_home import SDK_DOMAIN
@@ -105,8 +106,7 @@ class Tool:
         if self.name == "speaker_say" and (ctx.say_on is None or ctx.devices is None or not any(
                 link["driver"] == "cast" for link in ctx.devices.links)):
             return False
-        if self.name == "play_music" and (ctx.devices is None or not any(
-                link["driver"] == "cast" for link in ctx.devices.links)):
+        if self.name == "play_music" and not (_has_direct_speakers(ctx) or ctx.integration_ready(HOME.id)):
             return False
         return not (self.name == "sleep_start" and ctx.request_sleep is None)
 
@@ -190,6 +190,15 @@ def asked_to_act(question: str) -> bool:
     return bool(ON_OFF.search(question)) and not QUESTION_START.search(question)
 
 
+def continued_request(question: str, history: list[dict]) -> str:
+    """What the guards should read: a follow-up that is not a question carries on the last request
+    (measured: "make them purple" ... "they are still blue" was refused as "only asking about it")."""
+    if asked_to_act(question) or QUESTION_START.search(question) or question.rstrip().endswith("?"):
+        return question
+    last = next((m.get("content", "") for m in reversed(list(history)) if m.get("role") == "user"), "")
+    return f"{last} / {question}" if last and asked_to_act(last) else question
+
+
 def _remember(args: dict, ctx: ToolContext) -> dict:
     if not ASKED_TO_REMEMBER.search(ctx.question):
         raise ToolFailed("the user did not ask you to remember anything; just answer them")
@@ -230,7 +239,8 @@ def _device_names(config: dict) -> list[str]:
         log.warning("could not list devices: %s", exc)
         return []
     useful = [r for r in rows if r["entity_id"].split(".", 1)[0] not in ("sun", "zone", "person", "update")]
-    names = [f"{r['name']} ({r['entity_id']})" for r in useful[:MAX_DEVICE_NAMES]]
+    names = [f"{r['name']} ({r['entity_id']}" + (f", {r['room']})" if r.get("room") else ")")
+             for r in useful[:MAX_DEVICE_NAMES]]
     _device_cache.update(key=key, at=now, names=names)
     return names
 
@@ -273,7 +283,8 @@ def _control_direct(device, args: dict, ctx: ToolContext) -> dict:
     domain = KIND_DOMAINS.get(device.kind, device.kind)
     if domain not in ctx.allowed_domains:
         raise ToolFailed(f"controlling {domain} devices from chat is switched off (Settings → tools.allowed_domains)")
-    command = Command(args["action"], args.get("brightness_pct"), args.get("volume_pct"), args.get("app", ""))
+    command = Command(args["action"], args.get("brightness_pct"), args.get("volume_pct"), args.get("app", ""),
+                      args.get("color", ""))
     try:
         now = ctx.devices.control(device, command)
     except DeviceError as exc:
@@ -295,6 +306,8 @@ def _home_control(args: dict, ctx: ToolContext) -> dict:
     config = ctx.integration_config(HOME.id)
     if "." not in entity:                       # a name was given: find the device it means
         found = HOME.states(config, entity)
+        exact = [d for d in found if d["name"].lower() == entity.lower()]
+        found = exact or found                  # "Office light" is not also "Office light 2"
         if len(found) != 1:
             names = ", ".join(f"{d['name']} ({d['entity_id']})" for d in found[:8])
             raise ToolFailed(f"'{entity}' matches {len(found)} devices" + (f": {names}" if names else ""))
@@ -307,6 +320,21 @@ def _home_control(args: dict, ctx: ToolContext) -> dict:
         data["brightness_pct"] = max(0, min(100, int(args["brightness_pct"])))
     if args.get("temperature") is not None:
         data["temperature"] = float(args["temperature"])
+    scene = (args.get("scene") or "").strip()
+    if args.get("color") or scene:
+        if domain != "light":
+            raise ToolFailed("only lights have a color or a scene")
+        scenes = HOME.attributes(config, entity).get("effect_list") or []
+        if args.get("color") and not scene and _scene_named(scenes, args["color"]):
+            scene = args["color"]                  # "cozy" is one of the light's scenes, not a color
+        elif args.get("color"):
+            data.update(_ha_color(args["color"]))
+        if scene:
+            match = _scene_named(scenes, scene)
+            if match is None:
+                raise ToolFailed(f"this light has no scene '{scene}'" + (f"; its scenes are: {', '.join(scenes)}"
+                                                                         if scenes else ""))
+            data["effect"] = match
     action = args["action"]
     if action == "set" and domain == "climate":
         service = "set_temperature"
@@ -318,13 +346,48 @@ def _home_control(args: dict, ctx: ToolContext) -> dict:
     return {"done": f"{service} {entity}", "now": state}
 
 
+def _scene_named(scenes: list[str], wanted: str) -> str | None:
+    """'cozy' -> 'Cozy', 'the fireplace setting' -> 'Fireplace'."""
+    words = set(re.findall(r"[a-z]+", wanted.lower())) - {"the", "a", "setting", "scene", "mode", "color", "colour"}
+    for scene in scenes:
+        if set(re.findall(r"[a-z]+", scene.lower())) == words or scene.lower() == wanted.strip().lower():
+            return scene
+    return None
+
+
+def _ha_color(text: str) -> dict:
+    """A color in words -> Home Assistant's light.turn_on data."""
+    from ..devices import colors
+    try:
+        color = colors.parse(text)
+    except ValueError as exc:
+        raise ToolFailed(str(exc)) from None
+    if color.is_white:
+        return {"color_temp_kelvin": color.kelvin}
+    return {"rgb_color": list(color.rgb)}
+
+
 def _devices_find(_args: dict, ctx: ToolContext) -> dict:
     connected = {link["id"] for link in ctx.devices.links}
-    found, groups = [], {"connected": [], "not connected yet": [], "cannot control": []}
+    in_home = set()
+    if ctx.integration_ready(HOME.id):
+        try:
+            in_home = ha_features.known_macs(ctx.integration_config(HOME.id))
+        except CheckFailed as exc:
+            log.info("could not read Home Assistant's devices: %s", exc)
+    found, groups = [], {"connected": [], "in Home Assistant": [], "new, not in Home Assistant yet": [],
+                         "not connected yet": [], "cannot control": []}
     for f in ctx.devices.scan():
+        mac = re.sub(r"[^0-9a-f]", "", (f.ident or "").lower())
         if f.key in connected:
             status = "already connected"
             groups["connected"].append(f.name)
+        elif mac and mac in in_home:
+            status = "already in Home Assistant (control and name it there; do not connect it again)"
+            groups["in Home Assistant"].append(f.name)
+        elif f.driver == "wiz" and ctx.integration_ready(HOME.id):
+            status = "NEW: not in Home Assistant yet (home_organize adds it and names it in one step)"
+            groups["new, not in Home Assistant yet"].append(f.name)
         elif f.driver:
             status = "found, NOT connected yet (device_connect can connect it)"
             groups["not connected yet"].append(f.name + (f" ({f.note})" if f.note else ""))
@@ -334,9 +397,22 @@ def _devices_find(_args: dict, ctx: ToolContext) -> dict:
         found.append({"name": f.name, "model": f.model, "status": status})
     summary = ". ".join(f"{k.capitalize()}: {', '.join(v)}" for k, v in groups.items() if v)
     out = {"summary": summary or "Nothing answered on the network.", "found": found, "count": len(found)}
+    if ctx.integration_config(HOME.id).get("url") and not ctx.integration_ready(HOME.id):
+        out["home_assistant"] = ("NOT ANSWERING right now, so which devices are in it is unknown and nothing can be "
+                                 "named, put in a room or added to it. Tell the user Home Assistant is not reachable.")
+    new = groups["new, not in Home Assistant yet"]
+    if new and (ASKED_TO_ORGANIZE.search(ctx.question) or ASKED_TO_CONNECT.search(ctx.question)):
+        if len(new) == 1:
+            out["then"] = {"tool": "home_organize",
+                           "say": f"The new bulb is {new[0]}. Use device '{new[0]}' with the name and room the "
+                                  "user gave (it is added to Home Assistant automatically)."}
+        else:
+            out["then"] = {"tool": "home_discovered", "say": f"There are {len(new)} new bulbs ({', '.join(new)}): "
+                                                             "add them all with action add, name all."}
     if found:
         out["learned"] = ("The user's home network has: "
-                          + ", ".join(f"{f['name']} ({f['model']})" if f["model"] else f["name"] for f in found) + ".")
+                          + ", ".join(sorted(f"{f['name']} ({f['model']})" if f["model"] else f["name"]
+                                             for f in found)) + ".")
     return out
 
 
@@ -366,13 +442,41 @@ def _play_music(args: dict, ctx: ToolContext) -> dict:
     from ..integrations.base import CheckFailed
     if not asked_to_act(ctx.question):
         raise ToolFailed("the user did not ask for anything to be played; just answer them")
-    speaker = _one_speaker(ctx, args.get("device", "").strip())
+    speaker = _music_speaker(ctx, args.get("device", "").strip())
     try:
         station = find_station(args.get("what", ""))
+        if isinstance(speaker, dict):                     # a Home Assistant speaker
+            ha_features.play_url(ctx.integration_config(HOME.id), speaker["entity_id"], station["url"])
+            return {"playing": station["name"], "on": speaker["name"]}
         ctx.devices.play(speaker, station["url"], station["name"], station["content_type"], live=True)
     except (CheckFailed, DeviceError) as exc:
         raise ToolFailed(str(exc)) from None
     return {"playing": station["name"], "on": speaker.name}
+
+
+def _has_direct_speakers(ctx: ToolContext) -> bool:
+    return ctx.devices is not None and any(link["driver"] == "cast" for link in ctx.devices.links)
+
+
+def _music_speaker(ctx: ToolContext, name: str):
+    """A speaker Somni plays on itself (preferred), else one of Home Assistant's (a dict)."""
+    if _has_direct_speakers(ctx):
+        try:
+            return _one_speaker(ctx, name)
+        except ToolFailed:
+            if not ctx.integration_ready(HOME.id):
+                raise
+    if not ctx.integration_ready(HOME.id):
+        raise ToolFailed("no speakers are connected")
+    found = ha_features.speakers(ctx.integration_config(HOME.id))
+    words = _distinct_words(name) if name else set()
+    match = [s for s in found if words and words <= set(re.findall(r"[a-z0-9]+", s["name"].lower()))]
+    if len(match) == 1:
+        return match[0]
+    if not name and len(found) == 1:
+        return found[0]
+    raise ToolFailed(f"'{name}' matches {len(match)} speakers; the speakers are: "
+                     f"{', '.join(s['name'] for s in found) or 'none'}")
 
 
 def _speaker_say(args: dict, ctx: ToolContext) -> dict:
@@ -391,6 +495,95 @@ def _google(args: dict, ctx: ToolContext) -> dict:
     if not asked_to_act(ctx.question):
         raise ToolFailed("the user did not ask for anything to be done; just answer them")
     return HOME.google_command(ctx.integration_config(HOME.id), args["command"].strip()[:300])
+
+
+def _home_assist(args: dict, ctx: ToolContext) -> dict:
+    request = args["request"].strip()[:300]
+    if asked_to_act(request) and not asked_to_act(ctx.question):
+        raise ToolFailed("the user only asked a question; ask Home Assistant a question, do not change anything")
+    try:
+        out = ha_features.assist(ctx.integration_config(HOME.id), request)
+    except CheckFailed as exc:
+        raise ToolFailed(str(exc)) from None
+    if out.get("result") == "failed":
+        raise ToolFailed(out["note"])
+    return out
+
+
+ASKED_ROUTINE = re.compile(r"\b(every|each|daily|nightly|weekdays?|weekends?|routines?|automations?|automate|"
+                           r"schedule|whenever|when|sunrise|sunset|at \d|mornings?|nights?|evenings?)\b", re.I)
+ASKED_TO_REMOVE = re.compile(r"\b(delete|remove|cancel|stop|get rid|drop|undo|turn off|disable)\b", re.I)
+
+
+def _home_routine(args: dict, ctx: ToolContext) -> dict:
+    config = ctx.integration_config(HOME.id)
+    action = args.get("action", "list")
+    try:
+        if action == "list":
+            found = ha_features.routines(config)
+            return {"routines": found, "count": len(found)}
+        if action == "delete":
+            if not ASKED_TO_REMOVE.search(ctx.question):
+                raise ToolFailed("the user did not ask to remove a routine; ask them first")
+            return ha_features.delete_routine(config, args.get("name", ""))
+        if not ASKED_ROUTINE.search(ctx.question):
+            raise ToolFailed("the user did not ask for a routine; just answer them")
+        body = ha_features.routine_config(args.get("name", ""), args.get("do", ""), args.get("at", ""),
+                                          args.get("days", ""), int(args.get("offset_minutes") or 0),
+                                          args.get("device", ""), args.get("becomes", ""))
+        made = ha_features.save_routine(config, body)
+        trigger = body["triggers"][0]
+        made["when"] = trigger.get("at") or trigger.get("event") or \
+            f"{trigger.get('entity_id')} becomes {trigger.get('to', 'anything')}"
+        made["days"] = body["conditions"][0]["weekday"] if body["conditions"] else "every day"
+        made["does"] = args.get("do", "")
+        return made
+    except CheckFailed as exc:
+        raise ToolFailed(str(exc)) from None
+
+
+def _home_discovered(args: dict, ctx: ToolContext) -> dict:
+    config = ctx.integration_config(HOME.id)
+    try:
+        missed = ha_features.missed_wiz(config)
+        if args.get("action", "list") == "add":
+            if not ASKED_TO_CONNECT.search(ctx.question):
+                raise ToolFailed("the user did not ask to add anything; ask them first")
+            name = args.get("name", "all")
+            words = name.lower().strip()
+            everything = words in ("", "all", "everything", "all of them")
+            out: dict = {"added": []}
+            for bulb in missed:
+                if everything or words in bulb["name"].lower() or "wiz" in words or "bulb" in words:
+                    out["added"].append(ha_features.add_by_address(config, "wiz", bulb["host"])["added"])
+            try:
+                more = ha_features.add_discovered(config, name)
+                out["added"] += more["added"]
+                out.update({k: v for k, v in more.items() if k != "added"})
+            except CheckFailed:
+                if not out["added"]:
+                    raise
+            if out["added"]:
+                out["next"] = "ask the user what to call each new device and which room it is in (home_organize)"
+            return out
+        waiting = [w["name"] for w in ha_features.discovered(config)] + [b["name"] for b in missed]
+        return {"discovered": waiting, "count": len(waiting)}
+    except CheckFailed as exc:
+        raise ToolFailed(str(exc)) from None
+
+
+ASKED_TO_ORGANIZE = re.compile(r"\b(call|name|rename|label|room|is in|are in|put|move|belongs?|assign|office|"
+                               r"bedroom|kitchen|living|bathroom|garage|hall|dining|basement|nursery)\b", re.I)
+
+
+def _home_organize(args: dict, ctx: ToolContext) -> dict:
+    if not ASKED_TO_ORGANIZE.search(ctx.question):
+        raise ToolFailed("the user did not ask to rename or move anything; just answer them")
+    try:
+        return ha_features.organize(ctx.integration_config(HOME.id), args["device"], args.get("name", ""),
+                                    args.get("room", ""))
+    except CheckFailed as exc:
+        raise ToolFailed(str(exc)) from None
 
 
 # ---------------------------------------------------------------- the web
@@ -476,12 +669,18 @@ TOOLS: tuple[Tool, ...] = (
                   "domain": {"type": "string", "description": "device type, e.g. light, switch, climate, sensor"}}),
          _home_states),
     Tool("home_control", "Control a device",
-         "Control a smart-home device: turn it on or off, toggle it, set brightness, temperature or volume; "
-         "play, pause or stop what a speaker, display or TV is playing; launch an app on a TV.",
+         "Control ONE device (for a whole room or several devices use home_assist, or call this once per "
+         "device): turn it on or off, set brightness, color, scene, temperature or volume; play, pause or stop "
+         "a speaker, display or TV; launch an app on a TV.",
          _schema({"entity_id": {"type": "string", "description": "the device's id from the list, or its name"},
                   "action": {"type": "string", "enum": ["turn_on", "turn_off", "toggle", "set", "play", "pause",
                                                         "stop", "volume_up", "volume_down", "launch"]},
                   "brightness_pct": {"type": "integer", "description": "0-100, lights only"},
+                  "color": {"type": "string", "description": "lights only: a color name (red, teal, purple), "
+                                                             "a white (warm white, cool white, daylight, "
+                                                             "2700K) or a hex code"},
+                  "scene": {"type": "string", "description": "lights only: one of the light's own scenes, "
+                                                             "e.g. Cozy, Fireplace, Ocean, Relax"},
                   "temperature": {"type": "number", "description": "target temperature, climate only"},
                   "volume_pct": {"type": "integer", "description": "0-100, with action set, speakers only"},
                   "app": {"type": "string", "description": "app to open with action launch, e.g. Netflix"}},
@@ -510,6 +709,39 @@ TOOLS: tuple[Tool, ...] = (
          "(use home_control first for devices listed above).",
          _schema({"command": {"type": "string", "description": "what to tell Google, e.g. 'turn on the bedroom fan'"}},
                  ("command",)), _google, needs=HOME.id, acts=True, capability=SDK_DOMAIN),
+    Tool("home_assist", "Ask Home Assistant",
+         "Give Home Assistant's own assistant a smart-home request in plain words. Best for several devices or a "
+         "whole room at once ('turn off all the lights', 'turn on the kitchen lights'), timers, scenes, and "
+         "anything home_control can't do. It answers what it did.",
+         _schema({"request": {"type": "string", "description": "the request in plain English"}}, ("request",)),
+         _home_assist, needs=HOME.id, acts=True),
+    Tool("home_routine", "Routines",
+         "Create, list or delete a routine (a Home Assistant automation) that runs by itself: at a time, at "
+         "sunrise or sunset, or when a device changes. What it does is a request in plain words.",
+         _schema({"action": {"type": "string", "enum": ["create", "list", "delete"]},
+                  "name": {"type": "string", "description": "a short name; for delete, the routine's name"},
+                  "do": {"type": "string", "description": "what to do, e.g. 'turn off all the lights'"},
+                  "at": {"type": "string", "description": "a time like 22:00 or 7am, or sunrise / sunset"},
+                  "days": {"type": "string", "description": "e.g. 'weekdays', 'sat sun'; empty for every day"},
+                  "offset_minutes": {"type": "integer",
+                                     "description": "minutes after sunrise/sunset (negative: before)"},
+                  "device": {"type": "string", "description": "instead of a time: a device's entity_id"},
+                  "becomes": {"type": "string", "description": "with device: the state, e.g. on, off, home"}},
+                 ("action",)), _home_routine, needs=HOME.id, acts=True),
+    Tool("home_discovered", "New devices",
+         "Devices Home Assistant found on the network by itself and is waiting to add: list them, or add one "
+         "by name (or 'all') when the user wants them added.",
+         _schema({"action": {"type": "string", "enum": ["list", "add"]},
+                  "name": {"type": "string", "description": "for add: the device's name, or all"}}),
+         _home_discovered, needs=HOME.id, acts=True),
+    Tool("home_organize", "Name and room",
+         "Give a Home Assistant device a name and/or put it in a room (made if new), e.g. when the user says "
+         "'the new bulb is the office light'. A new WiZ bulb not in Home Assistant yet is added first, "
+         "automatically (device: 'the new bulb' or its name from devices_find). Then 'turn off the office' works.",
+         _schema({"device": {"type": "string", "description": "the device's entity_id or current name"},
+                  "name": {"type": "string", "description": "what to call it, e.g. 'Office light'"},
+                  "room": {"type": "string", "description": "the room, e.g. 'Office'"}}, ("device",)),
+         _home_organize, needs=HOME.id, acts=True),
     Tool("web_search", "Search the web",
          "Search the web for facts, news, prices, sports, opening hours or anything you are not sure about "
          "(not the weather: use weather). "
@@ -581,6 +813,20 @@ class CallRecord:
         if "connected" in r or "waiting" in r or "already" in r or "unsupported" in r:
             parts = [f"{k}: {', '.join(v)}" for k, v in r.items() if v]
             return "; ".join(parts)[:160]
+        if "home_assistant_said" in r:
+            return f"Home Assistant: {r['home_assistant_said'] or r['result']}"[:160]
+        if "created" in r:
+            return f"routine '{r['created']}' made"
+        if "deleted" in r:
+            return f"routine '{r['deleted']}' removed"
+        if "routines" in r:
+            return f"{r['count']} routines"
+        if "organized" in r:
+            return " in ".join(filter(None, [r.get("name") or r["organized"], r.get("room")]))
+        if "discovered" in r:
+            return f"{r['count']} new devices waiting"
+        if "added" in r:
+            return f"added {', '.join(r['added']) or 'nothing'}"
         if "sent" in r:
             return f"told Google: {r['sent']}"
         if "data" in r or ("text" in r and "url" not in r):
@@ -629,6 +875,51 @@ def available_tools(ctx: ToolContext) -> list[Tool]:
     return [t for t in TOOLS if t.available(ctx)]
 
 
+# Which tools a request could need. Every description the model is given is read on every step,
+# so offering all of them (2,700 tokens) to "name this bulb" made a 4B model slow, confused and,
+# on a 16 GB card, out of memory. A small machine needs a short prompt; this is how it gets one.
+TOOL_GROUPS: dict[str, tuple[tuple[str, ...], re.Pattern]] = {
+    "home control": (("home_states", "home_control", "home_assist", "google_command"),
+                     re.compile(r"\b(lights?|lamps?|bulbs?|plugs?|switch\w*|turn|dim\w*|bright\w*|colou?rs?|red|"
+                                r"blue|green|purple|pink|orange|yellow|white|warm|thermostat|heat\w*|cool\w*|fan|"
+                                r"locks?|doors?|camera|tv|roku|xbox|google|on|off|office|bedroom|kitchen|living|"
+                                r"bathroom|garage|hall|downstairs|upstairs|everything|all)\b", re.I)),
+    "home setup": (("devices_find", "device_connect", "home_discovered", "home_organize"),
+                   re.compile(r"\b(new|add\w*|connect\w*|pair\w*|scan\w*|find|found|discover\w*|set ?up|install\w*|"
+                              r"names?|named|rename|call (it|them)|rooms?|put|move|assign|network|devices?|wiz|hue|"
+                              r"home assistant)\b", re.I)),
+    "home media": (("play_music", "speaker_say", "home_control"),
+                   re.compile(r"\b(music|play\w*|songs?|radio|jazz|rock|pop|station|speakers?|displays?|volume|"
+                              r"louder|quieter|pause|stop|resume|say|announce|tell)\b", re.I)),
+    "home routines": (("home_routine", "home_states"),
+                      re.compile(r"\b(routines?|automations?|automate|every|each|daily|nightly|schedule\w*|"
+                                 r"sunrise|sunset|whenever|at \d|mornings?|evenings?|nights?)\b", re.I)),
+    "web": (("web_search", "web_read", "weather"),
+            re.compile(r"\b(weather|rain\w*|snow\w*|forecast|temperature|hot|cold|search|look (it )?up|news|"
+                       r"price|cost|how much|who|what|when|where|why|which|score|latest|today|tonight|tomorrow|"
+                       r"open|hours|define|wiki\w*|internet|web|online)\b", re.I)),
+    "email": (("email_unread", "email_search"), re.compile(r"\b(e-?mails?|inbox|mail|messages?)\b", re.I)),
+    "self": (("system_status", "computer_info", "clock_now"),
+             re.compile(r"\b(time|date|day|where am i|location|town|city|you|your|yourself|model|memor\w+|gpu|"
+                        r"graphics|system|status|connected|abilities|can you)\b", re.I)),
+}
+ALWAYS = ("memory_remember", "memory_search", "sleep_start", "api_call")
+
+
+def relevant_tools(tools: list[Tool], question: str, history: list[dict] = ()) -> list[Tool]:
+    """The tools this request could need: by what was said now and just before (a follow-up like
+    "yes, do it" keeps the last request's tools). Nothing recognised: every tool, as before."""
+    last_user = next((m.get("content", "") for m in reversed(list(history)) if m.get("role") == "user"), "")
+    text = f"{question} {last_user}"
+    wanted = set(ALWAYS)
+    for names, words in TOOL_GROUPS.values():
+        if words.search(text):
+            wanted.update(names)
+    if wanted == set(ALWAYS):
+        return tools
+    return [t for t in tools if t.name in wanted]
+
+
 def abilities(ctx: ToolContext) -> str:
     """What the assistant can actually do right now, in words (from the live tool and connection state),
     so "what are you connected to?" is answered from facts, not from what it could do in principle."""
@@ -657,7 +948,9 @@ def abilities(ctx: ToolContext) -> str:
     if not links and not ctx.integration_ready(HOME.id):
         missing.append("smart devices (none connected yet)")
     if ctx.integration_ready(HOME.id):
-        can.append("control devices through Home Assistant")
+        can.append("control devices through Home Assistant, by name or by room, and ask its own assistant")
+        can.append("make routines that run by themselves (times, sunrise/sunset, a device changing)")
+        can.append("add devices Home Assistant has discovered, and play music on its speakers")
     if "email_unread" in names:
         can.append("read the user's email")
     else:

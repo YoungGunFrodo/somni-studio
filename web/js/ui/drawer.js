@@ -42,9 +42,35 @@ export class Drawer {
     this.#mark(name);
     this.#drawer.hidden = false;
     document.body.classList.add("drawer-open");
-    clear(this.#body);
     this.onChange?.();
-    await tab.render(this.#body);
+    await this.#render(tab);
+  }
+
+  /** Render a tab. If that fails (Somni still starting, a request cut off), try once more, then say
+   *  so with a retry button instead of leaving the tab blank. */
+  async #render(tab) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        clear(this.#body);
+        await tab.render(this.#body);
+        return;
+      } catch (err) {
+        console.error(`drawer: ${tab.title} failed to load`, err);
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          continue;
+        }
+        clear(this.#body);
+        const note = document.createElement("p");
+        note.textContent = `${tab.title} didn't load (${err?.message ?? err}).`;
+        const retry = document.createElement("button");
+        retry.className = "btn";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", () => this.#render(tab));
+        this.#body.append(note, retry);
+        return;
+      }
+    }
   }
 
   close() {
@@ -61,8 +87,7 @@ export class Drawer {
     if (!this.#current) return;
     const tab = this.#tabs.get(this.#current);
     const scroll = this.#body.scrollTop;
-    clear(this.#body);
-    await tab.render(this.#body);
+    await this.#render(tab);
     this.#body.scrollTop = scroll;
   }
 

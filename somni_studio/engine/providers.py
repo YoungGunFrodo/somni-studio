@@ -25,7 +25,7 @@ from ..settings import StudioSettings
 from ..somni.home import ExpertSet, HomePaths, base_model, find_experts
 from ..somni.runtime import ensure_sleepai
 from ..somni.store_reader import somni_today
-from ..tools.catalog import ToolContext, abilities, available_tools, ready_checker
+from ..tools.catalog import ToolContext, abilities, available_tools, continued_request, ready_checker, relevant_tools
 from .agent import LocalBackend, ServerBackend, ToolAgent
 from .conversation import Conversation, with_history
 from .learning import (
@@ -104,6 +104,8 @@ ACK_PROMPT = ("The user just told you something and you saved it to memory: \"{f
               "warm sentence that shows you understood. Talk to the user directly. Do not quote the memory, list "
               "anything or ask a question.")
 ACK_TOKENS = 40
+# Where what a tool found out is kept: (key, tags). Not "user/...": those are recalled every time.
+TOOL_FINDINGS = {"devices_find": ("home/devices-on-network", ["home"])}
 
 
 def strip_citations(text: str) -> str:
@@ -262,13 +264,16 @@ class _RecallingProvider:
         about = re.sub(r"^the user'?s?\s+", "", text, flags=re.I)
         return self._save_fact(Fact(" ".join(about.split()[:4]), text))
 
-    def _save_fact(self, fact: Fact, strength: str = "user-confirmed", kind: str = "") -> str | None:
+    def _save_fact(self, fact: Fact, strength: str = "user-confirmed", kind: str = "",
+                   place: tuple[str, list[str]] | None = None) -> str | None:
         """Save (or update) a memory. Facts about the user are profile memories, recalled every time;
         a newer statement on the same topic replaces the older one ("call me Bob" after "call me sir")."""
         from sleepai.memory.lint import lint_memory
         from sleepai.memory.store import Memory
         day = self._today()
-        if kind:
+        if place:                                     # a fixed key: each update replaces the last
+            key, tags = place
+        elif kind:
             key, tags = f"{kind}/{slug(fact.topic, 48)}", [kind]
         elif fact.about_user:
             # Where the user lives has one key, however it was phrased, so a correction replaces it.
@@ -277,7 +282,7 @@ class _RecallingProvider:
         else:
             key, tags = f"note/{slug(fact.topic)}", ["note"]
         episode = self.conversation.episode
-        sources = ([f"episode:{episode}"] if episode else []) + [strength if not kind else "web"]
+        sources = ([f"episode:{episode}"] if episode else []) + [strength if not kind or place else "web"]
         memory = Memory(key=key, type="fact", summary=fact.sentence, value=fact.sentence, strength=strength,
                         sources=sources, tags=tags, created_day=day, last_verified_day=day)
         problems = lint_memory(memory)
@@ -331,9 +336,16 @@ class _RecallingProvider:
         for record in calls:
             sentence = record.result.get("learned") if record.ok and isinstance(record.result, dict) else None
             if sentence and not self.read_only:
-                topic = {"devices_find": "home devices"}.get(record.name, record.name)
-                if self._save_fact(Fact(topic, sentence), strength="verified"):
+                # One memory per kind of finding, replaced when it changes: a scan used to make a new
+                # "the user's network has ..." memory each time (the order changed), filed as a fact
+                # about the user and so put into every prompt.
+                place = TOOL_FINDINGS.get(record.name, (f"home/{slug(record.name)}", ["home"]))
+                saved = self._save_fact(Fact(record.name, sentence), strength="verified", place=place)
+                if saved:
                     made.append((sentence, "learned"))
+                    old = self.store.active_by_key(f"user/{slug('home devices')}")
+                    if record.name == "devices_find" and old is not None and "network has" in old.summary:
+                        self.store.update_fields(old.id, status="superseded", superseded_by=saved)
         return made
 
     def _learn_from_lookup(self, question: str, calls: list, answer: str) -> list[tuple[str, str]]:
@@ -362,10 +374,10 @@ class _RecallingProvider:
                    remembered: bool = False, forced: list[dict] | None = None):
         ctx = self._tool_context()
         if ctx is not None:
-            ctx.question = question
+            ctx.question = continued_request(question, history)
             if remembered:
                 ctx.remember = None                           # already saved: do not offer it again
-        tools = available_tools(ctx) if ctx else []
+        tools = relevant_tools(available_tools(ctx), question, history) if ctx else []
         names = {t.name for t in tools}
         if forced is None and "weather" in names and not personal_statement(question):
             call = weather_call(question)
@@ -390,6 +402,7 @@ class _RecallingProvider:
             result = self._try_tools(question, context, emit, history, remembered=bool(learned))
             if result is not None:
                 outcome, calls = self._tool_outcome(question, context, result), result.calls
+                self._keep_lesson(question, history, result)
             elif learned and not is_question(question):
                 outcome, calls = self._acknowledge(question, context, history, learned[0][0], emit), []
             else:
@@ -406,6 +419,15 @@ class _RecallingProvider:
             self._after_answer()
             self._emit = None
         return outcome
+
+    def _keep_lesson(self, question: str, history: list[dict], result) -> None:
+        """Every tool turn, with whether it really worked, kept for sleep (engine/lessons.py)."""
+        if self.read_only:
+            return
+        from ..tools.catalog import BY_NAME
+        from . import lessons
+        lessons.record(self.paths.home, question, history, result, {n for n, t in BY_NAME.items() if t.acts},
+                       self._today())
 
     def _acknowledge(self, question: str, context: list, history: list[dict], fact: str,
                      emit: Emitter) -> ChatOutcome:
@@ -505,9 +527,15 @@ class SomniLocalProvider(_RecallingProvider):
         student.adapter_dir = str(self.experts.directory) if self.experts.directory else None
         # HFStudent loads lazily through this module-level cache; loading here (same key) makes
         # the first question fast and gives the telemetry the exact model object wake uses.
+        from . import gpu_memory
         self.dtype = resolve_dtype(self.settings.provider.dtype)
+        gpu_memory.cap()
         with somni_load_dtype(self.dtype):
             self._model, self._tok = somni_hf._load(student.base_model, student.adapter_dir)
+        # Every generate() on this model reads its prompt in pieces, also the framework's own answer
+        # path (HFStudent.answer_many), not only the tool loop (agent.PREFILL_CHUNK explains why).
+        from .agent import PREFILL_CHUNK
+        self._model.generation_config.prefill_chunk_size = PREFILL_CHUNK
         self.telemetry = Telemetry(self._model, self._tok, modules_per_layer=len(self.experts.targets))
         self.telemetry.attach()
         return student
@@ -519,7 +547,9 @@ class SomniLocalProvider(_RecallingProvider):
         self.telemetry.begin(emit)
 
     def _after_answer(self) -> None:
+        from . import gpu_memory
         self.telemetry.end()
+        gpu_memory.release()
 
     def close(self) -> None:
         if self.telemetry is not None:

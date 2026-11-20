@@ -31,9 +31,10 @@ to sleep, decide what it keeps, and connect it to your home.
 | **Talk** | Type, click the mic and speak, or go hands-free: "Somni, turn on the kitchen light." Answers are read aloud as they are written. |
 | **Act** | It uses tools when you ask: the time, the weather, your devices, the web, your email, "remember that…", "go to sleep". |
 | **Look it up** | Like any assistant: when it does not know something (and it is not about you), it searches instead of saying "I'm not sure". Weather comes from Open-Meteo for wherever you said you live, or any place you name. |
-| **Devices** | Ask "find my devices" and it scans your network; "connect the kitchen display" and it is done. Lights and plugs (WiZ, LIFX, TP-Link Kasa, Philips Hue, Yeelight, Govee, Shelly), speakers and displays (Google Nest, Chromecast: volume, pause, and Somni speaking on them) and Roku. Directly on your network: no hub, no account, no cloud. |
+| **Devices** | Ask "find my devices" and it scans your network; "connect the kitchen display" and it is done. Lights and plugs (WiZ, LIFX, TP-Link Kasa, Philips Hue with a bridge or over the PC's Bluetooth without one, Yeelight, Govee, Shelly; colors by name, "warm white", hex or kelvin), speakers and displays (Google Nest, Chromecast: volume, pause, and Somni speaking on them) and Roku. Directly on your network: no hub, no account, no cloud. |
 | **Learn** | It remembers what you tell it about yourself ("you can call me sir") the moment you say it, keeps what it looked up for you, and recalls facts about you in every answer. A new memory forms in the graph like a star. |
 | **Sleep** | Press *Sleep now* (or tell it to) to learn from recent conversations. Watch it happen in the brain: memories form, a new expert grows up the tower, and it dreams, quizzing itself on what it learned. |
+| **Home** | With Home Assistant connected: whole rooms at once through its own assistant ("turn off the office"), rooms ("the new bulb is the office light" names it and puts it in a room, made if new), routines that run by themselves ("every weeknight at 10:30, turn the lights warm white"; times, sunrise/sunset, a device changing), scenes ("put the office on Cozy"), adding devices Home Assistant discovered, and music on its speakers. |
 | **Review** | Keep or reject what a night learned (Somni's morning review), with the test results. |
 | **Voice** | Choose from 27 English voices, set the speed, preview. |
 | **Connect** | Devices (above), Home Assistant (optional, for Zigbee, Z-Wave, thermostats and cloud-only brands; found on your network automatically), Google Home (through Home Assistant), web lookup and weather (Wikipedia and weather with no setup; for the whole web, a free Tavily or Brave key, or your own SearXNG), any API you have a key for (Custom API: say what it is for and Somni uses it; the key never reaches the model) and email (read-only). Each card shows how to set it up and what you can then say. |
@@ -58,7 +59,7 @@ You need Python 3.10+ and a GPU that PyTorch supports (NVIDIA, or AMD with ROCm)
 2. **Install the studio** into the same Python environment:
 
    ```
-   pip install -e .[voice,listen]
+   pip install -e .[voice,listen,bluetooth]
    python scripts/vendor.py        # three.js for the 3D view (hash-checked, once)
    python scripts/fetch_voice.py   # the Kokoro voice model, about 350 MB (hash-checked, once)
    python scripts/fetch_listen.py  # the Whisper base.en model, about 145 MB (pinned revision, once)
@@ -90,10 +91,12 @@ The first start creates a new, empty assistant in `data/home`. Settings live in 
   on?" never switches it); it saves to memory or goes to sleep only when your own words ask for it; web
   pages are read only from public addresses, never your own network; email access is read-only.
 - **Devices stay on your network.** Somni talks to them on your LAN only and never contacts their cloud.
-  Some need one switch first: Yeelight and Govee have a "LAN Control" setting in their app, a Hue bridge
+  Some need one switch first: newer WiZ bulbs answer but refuse commands until the WiZ app's Settings →
+  Security is set to "Allow all controls"; Yeelight and Govee have a "LAN Control" setting in their app, a Hue bridge
   needs its button pressed once. Tapo and newer Kasa firmware need a TP-Link login, and Matter devices
   need commissioning: neither is supported yet. If the router gives a device a new address, Somni finds
-  it again. A device you mention is read before answering, so "what volume is the kitchen display at?"
+  it again. Hue bulbs without a bridge connect over this PC's Bluetooth (`pip install -e .[bluetooth]`):
+  a new bulb pairs straight away, within about a room of the PC. A device you mention is read before answering, so "what volume is the kitchen display at?"
   is never a guess.
 - **Music** is internet radio from Radio Browser (radio-browser.info: free, open, no account): ask for a genre,
   a mood or a station ("play some jazz in the living room", "put on BBC Radio 2") and a Nest Hub or Chromecast
@@ -149,6 +152,21 @@ Design notes:
   picture, a new memory appears next to its subject without moving anything else, and layout cost grows
   linearly.
 - **Rendering is instanced**: one draw call per kind of node, so tens of thousands of memories stay smooth.
+- **Short prompts**: each request gets only the tools it could need (a light request is not offered email or
+  web search), and the model reads its prompt 512 tokens at a time, so working memory stays small and flat.
+  After each answer the graphics memory PyTorch kept is handed back, and Somni may use at most 80% of the
+  card: past that one answer fails with a clear message instead of Windows spilling into RAM and stalling
+  the PC.
+- **It does what it says.** A small model sometimes claims something is done without doing it. Somni checks:
+  asked to change something, it must use a tool; if it only looked, or stopped one step short of what a
+  tool said comes next, it is sent back to finish; if every action failed (or Home Assistant reports the
+  devices did not change), the answer says so. A follow-up that is not a question ("they are still blue")
+  carries on the last request.
+- **Tool lessons**: every tool turn is kept in `<home>/tool_lessons.jsonl` with whether it really worked (a
+  light read back "off" after "turn it off") and what Somni had to be corrected for, plus the clean version.
+  They are for sleep to learn from; nothing trains on them yet.
+- **Recall leaves out weak matches**: a memory needs a quarter of the question's content words, so "turn
+  off the lights" is not answered next to a note about the price of silver.
 - **Telemetry never changes the model's output** (tested) and costs about 0.5% of generation time (measured).
 - **Speech starts while the answer is still being written**: sentences are voiced one by one as they finish.
 - **Security**: nothing loads from a CDN at runtime; strict Content-Security-Policy; the WebSocket refuses
@@ -158,7 +176,7 @@ Design notes:
 ## Test
 
 ```
-python -m unittest discover -s tests -t .   # 210 tests; model tests use a tiny random Qwen3
+python -m unittest discover -s tests -t .   # 258 tests; model tests use a tiny random Qwen3
 python scripts/model_check.py <model>        # speed, tool calling (8 requests) and learning, for any model
 python scripts/ui_smoke.py                   # drives the running UI in headless Edge/Chrome, saves screenshots
 python scripts/ui_smoke.py --chat "Hello!"   # also loads the model, asks, and checks speech
@@ -170,6 +188,10 @@ python scripts/ui_smoke.py --voice-file say.wav   # hands-free through a fake mi
 
 - More connections (calendar, sending email with confirmation, cameras).
 - More device drivers (Tapo, Matter, Sonos); drivers as plugins, so a new brand is one small file.
+- A fast path for home commands: Home Assistant's own assistant first (no model, a fraction of a second), the
+  model only when it does not understand.
+- Talking to Somni from any room or device: paired phones and tablets, and voice satellites.
+- Sleep that learns from tool lessons, so the model does it right the first time.
 - Remote access (Tailscale, Cloudflare Tunnel) and a phone-sized layout.
 
 ## License

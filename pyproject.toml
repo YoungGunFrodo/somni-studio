@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "somni-studio"
-version = "0.4.0"
+version = "0.5.0"
 description = "A live 3D view of a Somni model's brain and memory, and a place to talk to it."
 readme = "README.md"
 license = { text = "MIT" }
@@ -23,6 +23,8 @@ model = ["transformers>=4.51", "accelerate", "safetensors", "peft", "numpy"]
 voice = ["kokoro-onnx==0.6.1"]
 # On-device speech recognition (CPU, its own process). Then: python scripts/fetch_listen.py
 listen = ["faster-whisper==1.2.1"]
+# Philips Hue bulbs over this PC's Bluetooth, without a bridge.
+bluetooth = ["bleak>=1.1"]
 dev = ["httpx>=0.27"]
 
 [project.scripts]

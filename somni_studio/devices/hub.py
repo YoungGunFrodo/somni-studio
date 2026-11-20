@@ -17,12 +17,14 @@ from pathlib import Path
 
 from . import net
 from .base import Command, Device, DeviceError, Driver, Found, NeedsUser
+from .bluetooth import HueBluetooth
 from .lights import Govee, Hue, Kasa, Lifx, Shelly, Wiz, Yeelight
 from .media import Cast, Roku
 
 log = logging.getLogger(__name__)
 
-DRIVERS: tuple[Driver, ...] = (Wiz(), Lifx(), Kasa(), Hue(), Yeelight(), Govee(), Shelly(), Cast(), Roku())
+DRIVERS: tuple[Driver, ...] = (Wiz(), Lifx(), Kasa(), Hue(), Yeelight(), Govee(), Shelly(), Cast(), Roku(),
+                               HueBluetooth())
 BY_ID = {d.id: d for d in DRIVERS}
 SCAN_S = 3.0
 SCAN_FRESH_S = 600              # a scan this recent is reused when connecting by name
@@ -72,7 +74,7 @@ class DeviceHub:
     # ------------------------------------------------------------ scanning
     def scan(self, timeout: float = SCAN_S) -> list[Found]:
         """Everything on the network that answers: devices Somni can control, and others it recognises."""
-        direct = [d for d in DRIVERS if d.id in ("wiz", "lifx", "kasa", "yeelight", "govee")]
+        direct = [d for d in DRIVERS if d.id in ("wiz", "lifx", "kasa", "yeelight", "govee", "hue_ble")]
         with ThreadPoolExecutor(max_workers=8, thread_name_prefix="scan") as pool:
             ssdp_job, mdns_job = pool.submit(net.ssdp, timeout), pool.submit(net.mdns, timeout)
             direct_jobs = [pool.submit(self._safe_discover, d, timeout, {}) for d in direct]
@@ -251,7 +253,8 @@ class DeviceHub:
         if link is None:
             raise DeviceError(f"{device.name} is not connected")
         if command.action == "toggle":
-            command = Command("turn_off" if device.on else "turn_on", command.brightness, command.volume, command.app)
+            command = Command("turn_off" if device.on else "turn_on", command.brightness, command.volume, command.app,
+                              command.color)
         driver = BY_ID[link["driver"]]
         try:
             driver.control(link, sub, command)
